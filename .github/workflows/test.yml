@@ -1,0 +1,15 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  migration:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test
