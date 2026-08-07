@@ -47,6 +47,18 @@ Include additional state when needed:
   --include-mailbox
 ```
 
+To migrate the portable Copilot environment in one bundle:
+
+```bash
+./scripts/backup.sh \
+  --output ~/Desktop/copilot-backup \
+  --include-environment
+```
+
+This includes configuration, MCP declarations, instructions, custom agents,
+canvas extensions, workflows, local skills, skill state, and plugin source
+declarations. Installed plugin caches and external MCP runtimes are not copied.
+
 Use `--copilot-home PATH` if Copilot state is not under `~/.copilot`.
 Bundles are created with owner-only permissions.
 
@@ -110,6 +122,20 @@ Restore optional bundle sections explicitly:
   --restore-mailbox
 ```
 
+Restore the portable environment and inspect machine-specific dependencies:
+
+```bash
+./scripts/restore.sh \
+  --bundle ~/Desktop/copilot-backup \
+  --restore-environment
+```
+
+Add `--install-plugins` to reinstall missing plugins from their recorded
+marketplace or GitHub source. The dependency report identifies absolute local
+MCP paths that do not exist on the destination. Homebrew, npm, Python, or other
+external runtimes still need to be installed separately. Plugin installation
+downloads executable code, so use it only with sources you trust.
+
 Any replaced destination data is moved under
 `~/.copilot/migration-backup-TIMESTAMP/`.
 
@@ -120,7 +146,8 @@ directory instead.
 
 - GitHub and Copilot authentication
 - macOS Keychain entries
-- installed plugin caches
+- installed plugin caches and plugin-specific data
+- MCP OAuth state and external MCP server runtimes
 - logs, crash reports, updater data, and other rebuildable caches
 - source repositories and worktrees
 - arbitrary files outside the selected Copilot state directory
@@ -137,4 +164,5 @@ make test
 The test suite uses temporary fake Copilot homes. It covers backup and restore,
 hidden archived sessions, live-session refusal, checksum corruption, collision
 policies, database-family replacement, stale sidecar removal, optional-section
-preflight, and destination backups.
+preflight, environment/plugin rehydration, MCP dependency reporting, rollback,
+and destination backups.

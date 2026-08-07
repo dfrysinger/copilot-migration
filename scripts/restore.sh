@@ -19,6 +19,8 @@ Options:
   --replace-databases        Replace existing session index database families
   --restore-config           Restore included configuration
   --restore-skills           Restore included skills and skill state
+  --restore-environment      Restore config and skills, then report dependencies
+  --install-plugins          Reinstall recorded plugins with environment restore
   --restore-mailbox          Restore included mailbox state
   -h, --help                 Show this help
 
@@ -33,6 +35,8 @@ SESSION_CONFLICT=abort
 REPLACE_DATABASES=0
 RESTORE_CONFIG=0
 RESTORE_SKILLS=0
+RESTORE_ENVIRONMENT=0
+INSTALL_PLUGINS=0
 RESTORE_MAILBOX=0
 
 while [ "$#" -gt 0 ]; do
@@ -64,6 +68,14 @@ while [ "$#" -gt 0 ]; do
       RESTORE_SKILLS=1
       shift
       ;;
+    --restore-environment)
+      RESTORE_ENVIRONMENT=1
+      shift
+      ;;
+    --install-plugins)
+      INSTALL_PLUGINS=1
+      shift
+      ;;
     --restore-mailbox)
       RESTORE_MAILBOX=1
       shift
@@ -92,6 +104,23 @@ require_command diff
 BUNDLE=$(existing_absolute_path "$BUNDLE")
 COPILOT_HOME=$(absolute_path "$COPILOT_HOME")
 "$SCRIPT_DIR/verify.sh" "$BUNDLE"
+
+if [ "$INSTALL_PLUGINS" -eq 1 ] && [ "$RESTORE_ENVIRONMENT" -ne 1 ]; then
+  die "--install-plugins requires --restore-environment"
+fi
+if [ "$INSTALL_PLUGINS" -eq 1 ]; then
+  DEFAULT_COPILOT_HOME=$(existing_absolute_path "$HOME/.copilot")
+  [ "$COPILOT_HOME" = "$DEFAULT_COPILOT_HOME" ] ||
+    die "--install-plugins requires --copilot-home $DEFAULT_COPILOT_HOME"
+fi
+if [ "$RESTORE_ENVIRONMENT" -eq 1 ]; then
+  grep -q '^includes_environment=1$' "$BUNDLE/metadata.txt" ||
+    die "bundle was not created with --include-environment"
+  [ -f "$BUNDLE/payload/plugins.txt" ] ||
+    die "bundle does not contain environment plugin declarations"
+  [ ! -f "$BUNDLE/payload/config.tar.gz" ] || RESTORE_CONFIG=1
+  [ ! -f "$BUNDLE/payload/skills.tar.gz" ] || RESTORE_SKILLS=1
+fi
 
 for request in \
   "$RESTORE_CONFIG:config.tar.gz" \
@@ -295,5 +324,12 @@ note "Sessions unchanged or kept: $skipped"
 note "Sessions replaced: $replaced"
 if [ -d "$BACKUP_ROOT" ]; then
   note "Replaced destination data was saved to: $BACKUP_ROOT"
+fi
+if [ "$RESTORE_ENVIRONMENT" -eq 1 ]; then
+  rehydrate_args=
+  [ "$INSTALL_PLUGINS" -ne 1 ] || rehydrate_args=--install-plugins
+  # shellcheck disable=SC2086
+  "$SCRIPT_DIR/rehydrate.sh" --bundle "$BUNDLE" \
+    --copilot-home "$COPILOT_HOME" $rehydrate_args
 fi
 note "Restore complete. Start Copilot CLI and resume a migrated session."

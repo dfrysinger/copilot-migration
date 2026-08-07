@@ -22,6 +22,26 @@ assert_contains() {
   grep -q "$2" "$1" || fail "$1 does not contain: $2"
 }
 
+assert_not_contains() {
+  if grep -q "$2" "$1"; then
+    fail "$1 unexpectedly contains: $2"
+  fi
+}
+
+write_test_manifest() {
+  local bundle="$1"
+  (
+    cd "$bundle"
+    {
+      printf '%s\n' metadata.txt
+      find payload -type f -print
+    } | LC_ALL=C sort |
+      while IFS= read -r file; do
+        shasum -a 256 "$file"
+      done
+  ) > "$bundle/MANIFEST.sha256"
+}
+
 make_source() {
   local home="$1"
   mkdir -p "$home/session-state/session-a/checkpoints" \
@@ -34,10 +54,16 @@ make_source() {
   printf 'session wal\n' > "$home/session-store.db-wal"
   printf 'data index\n' > "$home/data.db"
   printf 'instructions\n' > "$home/copilot-instructions.md"
-  mkdir -p "$home/skills/example" "$home/skill-state" "$home/mailbox/pending"
+  mkdir -p "$home/skills/example" "$home/skill-state" "$home/mailbox/pending" \
+    "$home/agents" "$home/extensions/example" "$home/workflows"
   printf 'skill\n' > "$home/skills/example/SKILL.md"
   printf '{}\n' > "$home/skill-state/state.json"
   printf '{}\n' > "$home/mailbox/pending/message.json"
+  printf '{}\n' > "$home/settings.json"
+  printf '{"mcpServers":{}}\n' > "$home/mcp-config.json"
+  printf 'agent\n' > "$home/agents/example.md"
+  printf 'extension\n' > "$home/extensions/example/extension.mjs"
+  printf 'workflow\n' > "$home/workflows/example.md"
 }
 
 SOURCE="$TMP/source/.copilot"
@@ -61,6 +87,9 @@ assert_file "$TARGET/data.db"
 assert_file "$TARGET/copilot-instructions.md"
 assert_file "$TARGET/skills/example/SKILL.md"
 assert_file "$TARGET/mailbox/pending/message.json"
+assert_file "$TARGET/agents/example.md"
+assert_file "$TARGET/extensions/example/extension.mjs"
+assert_file "$TARGET/workflows/example.md"
 assert_contains "$TARGET/session-state/session-a/events.jsonl" 'user.message'
 assert_contains "$TARGET/copilot-instructions.md" 'instructions'
 
@@ -105,16 +134,7 @@ fi
 
 cp -R "$BUNDLE" "$TMP/unsupported-payload-bundle"
 printf 'unsupported\n' > "$TMP/unsupported-payload-bundle/payload/other.db"
-(
-  cd "$TMP/unsupported-payload-bundle"
-  {
-    printf '%s\n' metadata.txt
-    find payload -type f -print
-  } | LC_ALL=C sort |
-    while IFS= read -r file; do
-      shasum -a 256 "$file"
-    done
-) > "$TMP/unsupported-payload-bundle/MANIFEST.sha256"
+write_test_manifest "$TMP/unsupported-payload-bundle"
 if "$VERIFY" "$TMP/unsupported-payload-bundle" >/dev/null 2>&1; then
   fail "verification accepted a manifest-tracked unsupported payload"
 fi
@@ -185,6 +205,113 @@ if "$RESTORE" --bundle "$SESSIONS_ONLY" --copilot-home "$TARGET" \
   fail "restore accepted a requested archive that was absent"
 fi
 assert_contains "$TARGET/preflight-marker" 'preflight marker'
+
+ENV_SOURCE="$TMP/environment-source/.copilot"
+ENV_BUNDLE="$TMP/environment-bundle"
+ENV_TARGET="$TMP/environment-target/.copilot"
+make_source "$ENV_SOURCE"
+cat > "$ENV_SOURCE/settings.json" <<'EOF'
+{"enabledPlugins":{"demo@market":true},"skillDirectories":[]}
+EOF
+cat > "$ENV_SOURCE/config.json" <<'EOF'
+{
+  "installedPlugins": [
+    {
+      "name": "demo",
+      "marketplace": "market",
+      "enabled": true
+    },
+    {
+      "name": "local-plugin",
+      "marketplace": "",
+      "enabled": true,
+      "source": {
+        "source": "github",
+        "repo": "example/local-plugin"
+      }
+    },
+    {
+      "name": "stale-plugin",
+      "marketplace": "",
+      "enabled": false,
+      "source": {
+        "source": "github",
+        "repo": "example/stale-plugin"
+      }
+    }
+  ]
+}
+EOF
+cat > "$ENV_SOURCE/mcp-config.json" <<'EOF'
+{
+  "mcpServers": {
+    "local-example": {
+      "type": "local",
+      "command": "/missing/bin/node",
+      "args": ["/missing/server.mjs"]
+    },
+    "relative-example": {
+      "type": "local",
+      "command": "missing-runtime",
+      "args": ["--serve"]
+    }
+  }
+}
+EOF
+mkdir -p "$ENV_SOURCE/installed-plugins/_direct/example--local-plugin"
+printf '{"name":"local-plugin"}\n' > \
+  "$ENV_SOURCE/installed-plugins/_direct/example--local-plugin/plugin.json"
+FAKE_BIN="$TMP/fake-bin"
+mkdir -p "$FAKE_BIN"
+cat > "$FAKE_BIN/copilot" <<'EOF'
+#!/bin/bash
+case "$1:$2" in
+  plugin:list)
+    printf 'Installed plugins:\n'
+    ;;
+  plugin:install)
+    printf '%s\n' "$3" >> "$COPILOT_FAKE_LOG"
+    ;;
+  *)
+    printf 'unexpected fake copilot command: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac
+EOF
+chmod +x "$FAKE_BIN/copilot"
+
+PATH="$FAKE_BIN:$PATH" \
+  "$BACKUP" --copilot-home "$ENV_SOURCE" --output "$ENV_BUNDLE" \
+  --include-environment >/dev/null
+assert_contains "$ENV_BUNDLE/payload/plugins.txt" 'demo@market'
+assert_contains "$ENV_BUNDLE/payload/plugins.txt" 'example/local-plugin'
+assert_not_contains "$ENV_BUNDLE/payload/plugins.txt" 'example/stale-plugin'
+
+cp -R "$ENV_BUNDLE" "$TMP/invalid-plugin-bundle"
+printf '%s\n' '--malicious-option' > \
+  "$TMP/invalid-plugin-bundle/payload/plugins.txt"
+write_test_manifest "$TMP/invalid-plugin-bundle"
+if "$VERIFY" "$TMP/invalid-plugin-bundle" >/dev/null 2>&1; then
+  fail "verification accepted an unsafe plugin source"
+fi
+
+ENV_REPORT="$TMP/environment-report.txt"
+PLUGIN_LOG="$TMP/plugin-installs.txt"
+HOME="$TMP/environment-target" PATH="$FAKE_BIN:$PATH" \
+  COPILOT_FAKE_LOG="$PLUGIN_LOG" \
+  "$RESTORE" --bundle "$ENV_BUNDLE" --copilot-home "$ENV_TARGET" \
+  --restore-environment --install-plugins > "$ENV_REPORT"
+assert_file "$ENV_TARGET/settings.json"
+assert_file "$ENV_TARGET/mcp-config.json"
+assert_file "$ENV_TARGET/skills/example/SKILL.md"
+assert_file "$ENV_TARGET/agents/example.md"
+assert_file "$ENV_TARGET/extensions/example/extension.mjs"
+assert_contains "$PLUGIN_LOG" 'demo@market'
+assert_contains "$PLUGIN_LOG" 'example/local-plugin'
+assert_contains "$ENV_REPORT" 'Unresolved commands or absolute configuration paths'
+assert_contains "$ENV_REPORT" '/missing/bin/node'
+assert_contains "$ENV_REPORT" '/missing/server.mjs'
+assert_contains "$ENV_REPORT" 'missing-runtime'
 
 ROLLBACK_TARGET="$TMP/rollback/.copilot"
 mkdir -p "$ROLLBACK_TARGET/session-state"

@@ -34,6 +34,8 @@ while IFS= read -r item; do
     session-store.db|session-store.db-wal|session-store.db-shm|\
     data.db|data.db-wal|data.db-shm)
       ;;
+    plugins.txt)
+      ;;
     *)
       die "payload contains an unsupported file: $(basename "$item")"
       ;;
@@ -44,12 +46,24 @@ safe_archive_listing "$BUNDLE/payload/session-state.tar.gz" \
   '^session-state(/|$)'
 [ ! -f "$BUNDLE/payload/config.tar.gz" ] ||
   safe_archive_listing "$BUNDLE/payload/config.tar.gz" \
-    '^(copilot-instructions\.md|config\.json|settings\.json|permissions-config\.json|mcp-config\.json|instructions|agents)(/|$)'
+    '^(copilot-instructions\.md|config\.json|settings\.json|permissions-config\.json|mcp-config\.json|instructions|agents|extensions|workflows)(/|$)'
 [ ! -f "$BUNDLE/payload/skills.tar.gz" ] ||
   safe_archive_listing "$BUNDLE/payload/skills.tar.gz" \
     '^(skills|skill-state)(/|$)'
 [ ! -f "$BUNDLE/payload/mailbox.tar.gz" ] ||
   safe_archive_listing "$BUNDLE/payload/mailbox.tar.gz" '^mailbox(/|$)'
+
+if [ -f "$BUNDLE/payload/plugins.txt" ]; then
+  if ! awk '
+    /^[[:space:]]*$/ { next }
+    /^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$/ { next }
+    /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(:[A-Za-z0-9._\/-]+)?$/ { next }
+    { bad = 1 }
+    END { exit bad }
+  ' "$BUNDLE/payload/plugins.txt"; then
+    die "plugins.txt contains an unsupported plugin source"
+  fi
+fi
 
 for base in session-store.db data.db; do
   if { [ -e "$BUNDLE/payload/$base-wal" ] ||

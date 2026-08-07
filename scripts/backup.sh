@@ -17,6 +17,7 @@ Options:
   --copilot-home PATH    Copilot state directory (default: ~/.copilot)
   --include-config       Include user configuration and instructions
   --include-skills       Include ~/.copilot/skills and skill-state
+  --include-environment  Include config, skills, and plugin source declarations
   --include-mailbox      Include ~/.copilot/mailbox
   -h, --help             Show this help
 
@@ -28,6 +29,7 @@ OUTPUT=
 COPILOT_HOME="${COPILOT_HOME:-$HOME/.copilot}"
 INCLUDE_CONFIG=0
 INCLUDE_SKILLS=0
+INCLUDE_ENVIRONMENT=0
 INCLUDE_MAILBOX=0
 
 while [ "$#" -gt 0 ]; do
@@ -50,6 +52,12 @@ while [ "$#" -gt 0 ]; do
       INCLUDE_SKILLS=1
       shift
       ;;
+    --include-environment)
+      INCLUDE_ENVIRONMENT=1
+      INCLUDE_CONFIG=1
+      INCLUDE_SKILLS=1
+      shift
+      ;;
     --include-mailbox)
       INCLUDE_MAILBOX=1
       shift
@@ -67,6 +75,9 @@ done
 require_macos
 require_command tar
 require_command shasum
+if [ "$INCLUDE_ENVIRONMENT" -eq 1 ]; then
+  require_command plutil
+fi
 
 COPILOT_HOME=$(existing_absolute_path "$COPILOT_HOME")
 [ -d "$COPILOT_HOME" ] || die "Copilot state directory not found: $COPILOT_HOME"
@@ -104,15 +115,21 @@ done
 if [ "$INCLUDE_CONFIG" -eq 1 ]; then
   config_items=
   for name in copilot-instructions.md config.json settings.json \
-    permissions-config.json mcp-config.json instructions agents; do
+    permissions-config.json mcp-config.json instructions agents extensions \
+    workflows; do
     if [ -e "$COPILOT_HOME/$name" ]; then
       config_items="$config_items $name"
     fi
   done
-  [ -n "$config_items" ] || die "--include-config requested, but no supported config was found"
-  # These names are fixed by this script and contain no shell metacharacters.
-  # shellcheck disable=SC2086
-  tar -C "$COPILOT_HOME" -czf "$BUILD/payload/config.tar.gz" $config_items
+  if [ -n "$config_items" ]; then
+    # These names are fixed by this script and contain no shell metacharacters.
+    # shellcheck disable=SC2086
+    tar -C "$COPILOT_HOME" -czf "$BUILD/payload/config.tar.gz" $config_items
+  elif [ "$INCLUDE_ENVIRONMENT" -ne 1 ]; then
+    die "--include-config requested, but no supported config was found"
+  else
+    INCLUDE_CONFIG=0
+  fi
 fi
 
 if [ "$INCLUDE_SKILLS" -eq 1 ]; then
@@ -122,9 +139,114 @@ if [ "$INCLUDE_SKILLS" -eq 1 ]; then
       skill_items="$skill_items $name"
     fi
   done
-  [ -n "$skill_items" ] || die "--include-skills requested, but no skills or skill-state was found"
-  # shellcheck disable=SC2086
-  tar -C "$COPILOT_HOME" -czf "$BUILD/payload/skills.tar.gz" $skill_items
+  if [ -n "$skill_items" ]; then
+    # shellcheck disable=SC2086
+    tar -C "$COPILOT_HOME" -czf "$BUILD/payload/skills.tar.gz" $skill_items
+  elif [ "$INCLUDE_ENVIRONMENT" -ne 1 ]; then
+    die "--include-skills requested, but no skills or skill-state was found"
+  else
+    INCLUDE_SKILLS=0
+  fi
+fi
+
+if [ "$INCLUDE_ENVIRONMENT" -eq 1 ]; then
+  PLUGINS="$BUILD/payload/plugins.txt"
+  ACTIVE_PLUGINS="$BUILD/active-plugins.txt"
+  : > "$PLUGINS"
+  : > "$ACTIVE_PLUGINS"
+  PLUGIN_METADATA=0
+  if [ -f "$COPILOT_HOME/config.json" ]; then
+    plugin_count=$(plutil -extract installedPlugins raw -o - \
+      "$COPILOT_HOME/config.json" 2>/dev/null || printf '0')
+    case "$plugin_count" in
+      ''|*[!0-9]*) plugin_count=0 ;;
+    esac
+    if [ "$plugin_count" -gt 0 ]; then
+      PLUGIN_METADATA=1
+      plugin_index=0
+      while [ "$plugin_index" -lt "$plugin_count" ]; do
+        prefix="installedPlugins.$plugin_index"
+        enabled=$(plutil -extract "$prefix.enabled" raw -o - \
+          "$COPILOT_HOME/config.json" 2>/dev/null || printf 'false')
+        if [ "$enabled" = "true" ]; then
+          plugin_name=$(plutil -extract "$prefix.name" raw -o - \
+            "$COPILOT_HOME/config.json")
+          marketplace=$(plutil -extract "$prefix.marketplace" raw -o - \
+            "$COPILOT_HOME/config.json" 2>/dev/null || true)
+          if [ -n "$marketplace" ]; then
+            printf '%s@%s\n' "$plugin_name" "$marketplace" >> "$PLUGINS"
+          else
+            repo=$(plutil -extract "$prefix.source.repo" raw -o - \
+              "$COPILOT_HOME/config.json" 2>/dev/null || true)
+            path=$(plutil -extract "$prefix.source.path" raw -o - \
+              "$COPILOT_HOME/config.json" 2>/dev/null || true)
+            if [ -n "$repo" ]; then
+              if [ -n "$path" ]; then
+                printf '%s:%s\n' "$repo" "$path" >> "$PLUGINS"
+              else
+                printf '%s\n' "$repo" >> "$PLUGINS"
+              fi
+            fi
+          fi
+        fi
+        plugin_index=$((plugin_index + 1))
+      done
+    fi
+  fi
+
+  if [ "$PLUGIN_METADATA" -eq 0 ] && [ -f "$COPILOT_HOME/settings.json" ]; then
+    plutil -extract enabledPlugins xml1 -o - \
+      "$COPILOT_HOME/settings.json" 2>/dev/null |
+      awk '
+        /<key>/ {
+          key = $0
+          sub(/^.*<key>/, "", key)
+          sub(/<\/key>.*$/, "", key)
+          getline
+          if ($0 ~ /<true\/>/) print key
+        }
+      ' > "$ACTIVE_PLUGINS" || true
+    cat "$ACTIVE_PLUGINS" >> "$PLUGINS"
+  fi
+  if [ "$PLUGIN_METADATA" -eq 0 ] &&
+     [ -d "$COPILOT_HOME/installed-plugins/_direct" ]; then
+    find "$COPILOT_HOME/installed-plugins/_direct" \
+      -mindepth 1 -maxdepth 1 -type d -print |
+      while IFS= read -r directory; do
+        name=$(basename "$directory")
+        manifest=
+        for candidate in \
+          "$directory/plugin.json" \
+          "$directory/.github/plugin/plugin.json" \
+          "$directory/.claude-plugin/plugin.json" \
+          "$directory/.codex-plugin/plugin.json"; do
+          if [ -f "$candidate" ]; then
+            manifest="$candidate"
+            break
+          fi
+        done
+        [ -n "$manifest" ] || continue
+        plugin_name=$(sed -n \
+          's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+          "$manifest" | sed -n '1p')
+        [ -n "$plugin_name" ] || continue
+        if awk -v name="$plugin_name" '
+          index($0, name "@") == 1 { found = 1 }
+          END { exit !found }
+        ' "$ACTIVE_PLUGINS"; then
+          continue
+        fi
+        case "$name" in
+          *--*)
+            owner=${name%%--*}
+            repo=${name#*--}
+            printf '%s/%s\n' "$owner" "$repo"
+            ;;
+        esac
+      done >> "$PLUGINS"
+  fi
+  rm -f "$ACTIVE_PLUGINS"
+  LC_ALL=C sort -u "$PLUGINS" -o "$PLUGINS"
 fi
 
 if [ "$INCLUDE_MAILBOX" -eq 1 ]; then
@@ -140,6 +262,7 @@ source_macos=$(sw_vers -productVersion 2>/dev/null || printf unknown)
 source_arch=$(uname -m)
 includes_config=$INCLUDE_CONFIG
 includes_skills=$INCLUDE_SKILLS
+includes_environment=$INCLUDE_ENVIRONMENT
 includes_mailbox=$INCLUDE_MAILBOX
 EOF
 
