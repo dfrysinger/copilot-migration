@@ -26,6 +26,7 @@ EOF
 BUNDLE=
 COPILOT_HOME="${COPILOT_HOME:-$HOME/.copilot}"
 INSTALL_PLUGINS=0
+INSTALL_FAILURES=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -99,7 +100,6 @@ plugin_is_installed() {
 }
 
 if [ "$INSTALL_PLUGINS" -eq 1 ]; then
-  failures=0
   while IFS= read -r source; do
     [ -n "$source" ] || continue
     if plugin_is_installed "$source"; then
@@ -109,11 +109,9 @@ if [ "$INSTALL_PLUGINS" -eq 1 ]; then
     note "Installing plugin: $source"
     if ! COPILOT_HOME="$COPILOT_HOME" copilot plugin install "$source"; then
       note "Plugin installation failed: $source" >&2
-      failures=$((failures + 1))
+      INSTALL_FAILURES=$((INSTALL_FAILURES + 1))
     fi
   done < "$PLUGINS"
-  [ "$failures" -eq 0 ] ||
-    die "$failures plugin installation(s) failed"
 fi
 
 note ""
@@ -180,3 +178,5 @@ else
   note "No unresolved commands or absolute configuration paths detected."
 fi
 note "Remote MCP sign-ins and local runtimes may still require setup."
+[ "$INSTALL_FAILURES" -eq 0 ] ||
+  die "$INSTALL_FAILURES plugin installation(s) failed"

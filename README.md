@@ -134,7 +134,8 @@ Add `--install-plugins` to reinstall missing plugins from their recorded
 marketplace or GitHub source. The dependency report identifies absolute local
 MCP paths that do not exist on the destination. Homebrew, npm, Python, or other
 external runtimes still need to be installed separately. Plugin installation
-downloads executable code, so use it only with sources you trust.
+downloads executable code, so use it only with sources you trust. Private
+plugin sources require working GitHub authentication on the destination.
 
 Any replaced destination data is moved under
 `~/.copilot/migration-backup-TIMESTAMP/`.

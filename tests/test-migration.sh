@@ -270,6 +270,9 @@ case "$1:$2" in
     printf 'Installed plugins:\n'
     ;;
   plugin:install)
+    if [ "${FAKE_FAIL_SOURCE:-}" = "$3" ]; then
+      exit 9
+    fi
     printf '%s\n' "$3" >> "$COPILOT_FAKE_LOG"
     ;;
   *)
@@ -312,6 +315,17 @@ assert_contains "$ENV_REPORT" 'Unresolved commands or absolute configuration pat
 assert_contains "$ENV_REPORT" '/missing/bin/node'
 assert_contains "$ENV_REPORT" '/missing/server.mjs'
 assert_contains "$ENV_REPORT" 'missing-runtime'
+
+FAILED_REPORT="$TMP/failed-environment-report.txt"
+if HOME="$TMP/environment-target" PATH="$FAKE_BIN:$PATH" \
+  COPILOT_FAKE_LOG="$TMP/failed-plugin-installs.txt" \
+  FAKE_FAIL_SOURCE='demo@market' \
+  "$ROOT/scripts/rehydrate.sh" --bundle "$ENV_BUNDLE" \
+  --copilot-home "$ENV_TARGET" \
+  --install-plugins > "$FAILED_REPORT" 2>/dev/null; then
+  fail "plugin installation failure returned success"
+fi
+assert_contains "$FAILED_REPORT" 'Unresolved commands or absolute configuration paths'
 
 ROLLBACK_TARGET="$TMP/rollback/.copilot"
 mkdir -p "$ROLLBACK_TARGET/session-state"
