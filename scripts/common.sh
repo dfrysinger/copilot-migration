@@ -30,6 +30,17 @@ absolute_path() {
   printf '%s/%s\n' "$parent" "$name"
 }
 
+existing_absolute_path() {
+  local path="$1"
+  local parent
+  local name
+  parent=$(dirname "$path")
+  name=$(basename "$path")
+  [ -d "$parent" ] || die "parent directory not found: $parent"
+  parent=$(cd "$parent" && pwd -P)
+  printf '%s/%s\n' "$parent" "$name"
+}
+
 live_session_locks() {
   local session_root="$1"
   local lock
@@ -64,18 +75,53 @@ refuse_live_sessions() {
 
 safe_archive_listing() {
   local archive="$1"
-  tar -tzf "$archive" | awk '
+  local allowed_paths="$2"
+  local listing
+  listing=$(mktemp "${TMPDIR:-/tmp}/copilot-archive-list.XXXXXX")
+  if ! tar -tzf "$archive" > "$listing"; then
+    rm -f "$listing"
+    die "archive cannot be read: $(basename "$archive")"
+  fi
+  if ! awk '
     BEGIN { bad = 0 }
     /^\/|(^|\/)\.\.(\/|$)/ { bad = 1 }
     END { exit bad }
-  '
+  ' "$listing"; then
+    rm -f "$listing"
+    die "archive contains an unsafe path: $(basename "$archive")"
+  fi
+  if ! awk -v allowed="$allowed_paths" '
+    {
+      path = $0
+      sub(/\/$/, "", path)
+      if (path !~ allowed) bad = 1
+    }
+    END { exit bad }
+  ' "$listing"; then
+    rm -f "$listing"
+    die "archive contains an unexpected path: $(basename "$archive")"
+  fi
+  rm -f "$listing"
+
+  if ! tar -tvzf "$archive" | awk '
+    {
+      type = substr($1, 1, 1)
+      if (type != "-" && type != "d") bad = 1
+    }
+    END { exit bad }
+  '; then
+    die "archive contains a non-file entry: $(basename "$archive")"
+  fi
 }
 
 write_manifest() {
   local bundle="$1"
   (
     cd "$bundle"
-    find payload -type f -print | LC_ALL=C sort |
+    {
+      printf '%s\n' metadata.txt
+      find payload -type f -print
+    } | LC_ALL=C sort |
       while IFS= read -r file; do
         shasum -a 256 "$file"
       done
@@ -87,6 +133,17 @@ verify_manifest() {
   local expected
   local actual
   [ -f "$bundle/MANIFEST.sha256" ] || die "missing MANIFEST.sha256"
+  if ! awk '
+    length($1) != 64 || $1 !~ /^[0-9a-f]+$/ { bad = 1 }
+    {
+      path = substr($0, 67)
+      if (path != "metadata.txt" && path !~ /^payload\//) bad = 1
+      if (path ~ /(^|\/)\.\.(\/|$)/ || path ~ /^\//) bad = 1
+    }
+    END { exit bad }
+  ' "$bundle/MANIFEST.sha256"; then
+    die "MANIFEST.sha256 contains an unsafe or malformed entry"
+  fi
   (
     cd "$bundle"
     shasum -a 256 -c MANIFEST.sha256
@@ -97,7 +154,10 @@ verify_manifest() {
   (
     cd "$bundle"
     sed -E 's/^[0-9a-f]{64}  //' MANIFEST.sha256 | LC_ALL=C sort > "$expected"
-    find payload -type f -print | LC_ALL=C sort > "$actual"
+    {
+      printf '%s\n' metadata.txt
+      find payload ! -type d -print
+    } | LC_ALL=C sort > "$actual"
   )
   if ! cmp -s "$expected" "$actual"; then
     rm -f "$expected" "$actual"

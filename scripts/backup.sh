@@ -68,7 +68,7 @@ require_macos
 require_command tar
 require_command shasum
 
-COPILOT_HOME=$(absolute_path "$COPILOT_HOME")
+COPILOT_HOME=$(existing_absolute_path "$COPILOT_HOME")
 [ -d "$COPILOT_HOME" ] || die "Copilot state directory not found: $COPILOT_HOME"
 [ -d "$COPILOT_HOME/session-state" ] ||
   die "session-state not found under $COPILOT_HOME"
@@ -79,21 +79,25 @@ if [ -z "$OUTPUT" ]; then
 fi
 OUTPUT=$(absolute_path "$OUTPUT")
 [ ! -e "$OUTPUT" ] || die "output already exists: $OUTPUT"
+case "$OUTPUT/" in
+  "$COPILOT_HOME/"*) die "output must not be inside the Copilot state directory" ;;
+esac
 
-mkdir -p "$OUTPUT/payload"
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/copilot-migration-backup.XXXXXX")
-trap 'rm -rf "$WORK"' EXIT
+umask 077
+BUILD=$(mktemp -d "$(dirname "$OUTPUT")/.copilot-migration-build.XXXXXX")
+trap 'rm -rf "$BUILD"' EXIT
+mkdir -p "$BUILD/payload"
 
 note "Archiving session directories..."
 tar -C "$COPILOT_HOME" \
   --exclude='session-state/*/inuse.*.lock' \
-  -czf "$OUTPUT/payload/session-state.tar.gz" session-state
+  -czf "$BUILD/payload/session-state.tar.gz" session-state
 
 note "Copying session indexes..."
 for name in session-store.db session-store.db-wal session-store.db-shm \
   data.db data.db-wal data.db-shm; do
   if [ -f "$COPILOT_HOME/$name" ]; then
-    cp -p "$COPILOT_HOME/$name" "$OUTPUT/payload/$name"
+    cp -p "$COPILOT_HOME/$name" "$BUILD/payload/$name"
   fi
 done
 
@@ -105,11 +109,10 @@ if [ "$INCLUDE_CONFIG" -eq 1 ]; then
       config_items="$config_items $name"
     fi
   done
-  if [ -n "$config_items" ]; then
-    # These names are fixed by this script and contain no shell metacharacters.
-    # shellcheck disable=SC2086
-    tar -C "$COPILOT_HOME" -czf "$OUTPUT/payload/config.tar.gz" $config_items
-  fi
+  [ -n "$config_items" ] || die "--include-config requested, but no supported config was found"
+  # These names are fixed by this script and contain no shell metacharacters.
+  # shellcheck disable=SC2086
+  tar -C "$COPILOT_HOME" -czf "$BUILD/payload/config.tar.gz" $config_items
 fi
 
 if [ "$INCLUDE_SKILLS" -eq 1 ]; then
@@ -119,17 +122,18 @@ if [ "$INCLUDE_SKILLS" -eq 1 ]; then
       skill_items="$skill_items $name"
     fi
   done
-  if [ -n "$skill_items" ]; then
-    # shellcheck disable=SC2086
-    tar -C "$COPILOT_HOME" -czf "$OUTPUT/payload/skills.tar.gz" $skill_items
-  fi
+  [ -n "$skill_items" ] || die "--include-skills requested, but no skills or skill-state was found"
+  # shellcheck disable=SC2086
+  tar -C "$COPILOT_HOME" -czf "$BUILD/payload/skills.tar.gz" $skill_items
 fi
 
-if [ "$INCLUDE_MAILBOX" -eq 1 ] && [ -d "$COPILOT_HOME/mailbox" ]; then
-  tar -C "$COPILOT_HOME" -czf "$OUTPUT/payload/mailbox.tar.gz" mailbox
+if [ "$INCLUDE_MAILBOX" -eq 1 ]; then
+  [ -d "$COPILOT_HOME/mailbox" ] ||
+    die "--include-mailbox requested, but mailbox was not found"
+  tar -C "$COPILOT_HOME" -czf "$BUILD/payload/mailbox.tar.gz" mailbox
 fi
 
-cat > "$OUTPUT/metadata.txt" <<EOF
+cat > "$BUILD/metadata.txt" <<EOF
 format_version=1
 created_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 source_macos=$(sw_vers -productVersion 2>/dev/null || printf unknown)
@@ -139,10 +143,11 @@ includes_skills=$INCLUDE_SKILLS
 includes_mailbox=$INCLUDE_MAILBOX
 EOF
 
-write_manifest "$OUTPUT"
-verify_manifest "$OUTPUT" >/dev/null
+write_manifest "$BUILD"
+verify_manifest "$BUILD" >/dev/null
+mv "$BUILD" "$OUTPUT"
+trap - EXIT
 
 note ""
 note "Backup complete: $OUTPUT"
 note "This bundle contains private conversation history. Store and transfer it securely."
-

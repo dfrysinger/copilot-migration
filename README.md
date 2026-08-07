@@ -6,6 +6,9 @@ The scripts preserve session directories and local session indexes without
 assuming a particular workspace layout. Optional flags also migrate Copilot
 instructions, configuration, skills, skill state, and mailbox data.
 
+Workspace paths recorded inside a session are preserved as history. The tools
+do not copy repositories or rewrite those paths.
+
 ## Requirements
 
 - macOS
@@ -45,6 +48,7 @@ Include additional state when needed:
 ```
 
 Use `--copilot-home PATH` if Copilot state is not under `~/.copilot`.
+Bundles are created with owner-only permissions.
 
 ## Transfer and verify
 
@@ -56,8 +60,9 @@ transport or external drive.
 ```
 
 The bundle contains private conversation history and may contain repository
-content, prompts, tool output, or configuration. Do not publish it or place it
-in an untrusted cloud location.
+content, prompts, tool output, credentials embedded in MCP configuration, or
+other sensitive data. Do not publish it. Use an encrypted external drive or an
+encrypted network transport.
 
 ## Restore
 
@@ -108,6 +113,9 @@ Restore optional bundle sections explicitly:
 Any replaced destination data is moved under
 `~/.copilot/migration-backup-TIMESTAMP/`.
 
+If `--copilot-home` points elsewhere, recovery backups are created under that
+directory instead.
+
 ## What is intentionally excluded
 
 - GitHub and Copilot authentication
@@ -127,6 +135,6 @@ make test
 ```
 
 The test suite uses temporary fake Copilot homes. It covers backup and restore,
-live-session refusal, checksum corruption, collision preflight, and replacement
-with destination backup.
-
+hidden archived sessions, live-session refusal, checksum corruption, collision
+policies, database-family replacement, stale sidecar removal, optional-section
+preflight, and destination backups.
